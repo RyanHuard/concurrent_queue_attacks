@@ -1,5 +1,5 @@
-#ifndef MICHEALSCOTTQUEUE_HPP
-#define MICHEALSCOTTQUEUE_HPP
+#ifndef MSQUEUE_HPP
+#define MSQUEUE_HPP
 
 #pragma once
 
@@ -40,12 +40,12 @@ struct Node {
 };
 
 template <typename sPayload>
-struct alignas(64) MichealScottQueue {
+struct alignas(64) MSQueue {
     alignas(64) std::atomic<Pointer_t<sPayload>> head;
     alignas(64) std::atomic<Pointer_t<sPayload>> tail;
 
     // Construct an empty queue with a single dummy node.
-    explicit MichealScottQueue(Node<sPayload> *dummy) noexcept {
+    explicit MSQueue(Node<sPayload> *dummy) noexcept {
         Pointer_t<sPayload> d(dummy, 0);
         head.store(d, std::memory_order_relaxed);
         tail.store(d, std::memory_order_relaxed);
@@ -54,8 +54,8 @@ struct alignas(64) MichealScottQueue {
     }
     
     // No copy/move -- queue positions are shared state.
-    MichealScottQueue(const MichealScottQueue &) = delete;
-    MichealScottQueue &operator=(const MichealScottQueue &) = delete;
+    MSQueue(const MSQueue &) = delete;
+    MSQueue &operator=(const MSQueue &) = delete;
 
     sPayload* enqueue(Node<sPayload>* new_node) {
         new_node->next.store(Pointer_t<sPayload>(nullptr, 0), std::memory_order_relaxed);
@@ -120,4 +120,4 @@ struct alignas(64) MichealScottQueue {
     }
 };
 
-#endif // MICHEALSCOTTQUEUE_HPP
+#endif // MSQUEUE_HPP

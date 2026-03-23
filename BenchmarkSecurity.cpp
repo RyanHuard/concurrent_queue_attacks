@@ -41,14 +41,9 @@ static bool pin_thread_to_core(int core_id) {
 }
 
 
-int main(int argc, char* argv[]) {
-    int num_ops = 1000;
-    bool workers_idle = (argc > 1 && std::string(argv[1]) == "--idle");
-
-    LPRQ<Payload> queue(nullptr);
-    
-    // make sure all threads start at same time
-    std::barrier sync(5);
+template <typename Queue>
+void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int max_threads) {
+    std::barrier sync(max_threads);
 
     auto attacker = [&](int tid) {
         std::vector<uint64_t> latencies;
@@ -56,7 +51,8 @@ int main(int argc, char* argv[]) {
         sync.arrive_and_wait();
 
         for (int i = 0; i < num_ops; i++) {
-            Payload* item = new Payload{tid};
+            Payload* payload = new Payload(tid);
+            Node<Payload>* item = new Node<Payload>(payload);
 
             uint64_t start = rdtscp();
             queue.enqueue(item);
@@ -66,6 +62,7 @@ int main(int argc, char* argv[]) {
         }
         
         std::string filename = workers_idle ? "latencies_idle.csv" : "latencies_active.csv";
+        filename.insert(0, queue_type + "_");
         std::ofstream file(filename);
         file << "sample,latency\n";
         for (int i = 0; i < latencies.size(); i++) {
@@ -79,9 +76,11 @@ int main(int argc, char* argv[]) {
         if (workers_idle) return;
 
         for (int i = 0; i < num_ops; i++) {
-            Payload* item = new Payload{tid};
+            Payload* payload = new Payload(tid);
+            Node<Payload>* item = new Node<Payload>(payload);
+
             queue.enqueue(item);
-            Payload* result = queue.dequeue();
+            Node<Payload>* result = queue.dequeue();
         }
     };
 
@@ -93,6 +92,32 @@ int main(int argc, char* argv[]) {
 
     for (auto& t : threads) {
         t.join();
+    }
+
+}
+
+
+int main(int argc, char* argv[]) {
+    int num_ops = 10000;
+    int max_threads = 5;
+
+    std::string queue_type = "ms";
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg.rfind("--queue=", 0) == 0) queue_type = arg.substr(8);
+        if (arg.rfind("--ops=", 0) == 0) num_ops = std::stoi(arg.substr(6));
+    }
+
+    if (queue_type == "ms") {
+        MSQueue<Payload> idle_queue(new Node<Payload>());
+        MSQueue<Payload> active_queue(new Node<Payload>());
+        run(idle_queue, true, queue_type, num_ops, max_threads);
+        run(active_queue, false, queue_type, num_ops, max_threads);
+    } else if (queue_type == "lprq") {
+        LPRQ<Node<Payload>> idle_queue(nullptr);
+        LPRQ<Node<Payload>> active_queue(nullptr);
+        run(idle_queue, true, queue_type, num_ops, max_threads);
+        run(active_queue, false, queue_type, num_ops, max_threads);
     }
 
     return 0;

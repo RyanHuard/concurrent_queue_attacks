@@ -1,15 +1,19 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import glob
 
-idle = pd.read_csv("latencies_idle.csv")
-active = pd.read_csv("latencies_active.csv")
+files = glob.glob("*_latencies_*.csv")
 
-plt.hist(idle["latency"], bins=50, label="idle")
-plt.hist(active["latency"], bins=50, label="active")
+for f in files:
+    df = pd.read_csv(f)
+   #df = df[df["latency"] < df["latency"].quantile(0.9)]
+    label = f.replace(".csv", "").replace("_latencies_", " ")
+    plt.hist(df["latency"], bins=50, alpha=0.6, label=label)
+
 plt.xlabel("Enqueue Latency (cycles)")
 plt.ylabel("Frequency")
 plt.legend()
-plt.title("Attacker Enqueue Latency: Idle vs Active Workers (4 threads)")
-plt.xlim(0, 1000)
+plt.xscale("log")
+plt.title("Attacker Enqueue Latency: Idle vs Active Workers")
 plt.savefig("latency_comparison.png")
 plt.show()

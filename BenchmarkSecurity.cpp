@@ -17,6 +17,7 @@
 
 #include "LPRQ.hpp"
 #include "MSQueue.hpp"
+#include "FCQ.hpp"
 #include "sPayload.hpp"
 
 struct Payload {
@@ -42,10 +43,13 @@ static bool pin_thread_to_core(int core_id) {
 
 
 template <typename Queue>
-void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int max_threads) {
-    std::barrier sync(max_threads);
+void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int worker_threads) {
+    // Wait for all worker threads + attacker thread
+    std::barrier sync(worker_threads + 1);
 
     auto attacker = [&](int tid) {
+        pin_thread_to_core(tid); // attacker gets its own core
+
         std::vector<uint64_t> latencies;
 
         sync.arrive_and_wait();
@@ -55,22 +59,28 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
             Node<Payload>* item = new Node<Payload>(payload);
 
             uint64_t start = rdtscp();
-            queue.enqueue(item);
+            queue.enqueue(item, tid);
             uint64_t end = rdtscp();
 
             latencies.push_back(end - start);
         }
         
-        std::string filename = workers_idle ? "latencies_idle.csv" : "latencies_active.csv";
-        filename.insert(0, queue_type + "_");
-        std::ofstream file(filename);
-        file << "sample,latency\n";
-        for (int i = 0; i < latencies.size(); i++) {
-            file << i << ","<< latencies[i] << "\n";
+
+        std::string filename = queue_type + "_" + (workers_idle ? "latencies_idle.csv" : "latencies_active.csv");
+        bool file_exists = std::ifstream(filename).good();
+        std::ofstream file(filename, std::ios::app);
+
+        if (!file_exists) {
+            file << "workers,sample,latency\n";
+        }
+
+        for (size_t i = 0; i < latencies.size(); i++) {
+            file << worker_threads << "," << i << "," << latencies[i] << "\n";
         }
     };
 
     auto worker = [&](int tid) {
+        pin_thread_to_core(tid);
         sync.arrive_and_wait();
         
         if (workers_idle) return;
@@ -78,17 +88,17 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
         for (int i = 0; i < num_ops; i++) {
             Payload* payload = new Payload(tid);
             Node<Payload>* item = new Node<Payload>(payload);
-
-            queue.enqueue(item);
-            Node<Payload>* result = queue.dequeue();
+            
+            queue.enqueue(item, tid);
+            Node<Payload>* result = queue.dequeue(tid);
         }
     };
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < worker_threads; i++) {
         threads.emplace_back(worker, i);
     }
-    threads.emplace_back(attacker, 4);
+    threads.emplace_back(attacker, worker_threads);
 
     for (auto& t : threads) {
         t.join();
@@ -98,26 +108,42 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
 
 int main(int argc, char* argv[]) {
-    int num_ops = 10000;
-    int max_threads = 5;
-
+    int num_ops = 1000; // per-thread
+    int max_workers = 8;
     std::string queue_type = "ms";
+
+    // Parse args
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg.rfind("--queue=", 0) == 0) queue_type = arg.substr(8);
         if (arg.rfind("--ops=", 0) == 0) num_ops = std::stoi(arg.substr(6));
+        if (arg.rfind("--threads=", 0) == 0) max_workers = std::stoi(arg.substr(10));
     }
 
-    if (queue_type == "ms") {
-        MSQueue<Payload> idle_queue(new Node<Payload>());
-        MSQueue<Payload> active_queue(new Node<Payload>());
-        run(idle_queue, true, queue_type, num_ops, max_threads);
-        run(active_queue, false, queue_type, num_ops, max_threads);
-    } else if (queue_type == "lprq") {
-        LPRQ<Node<Payload>> idle_queue(nullptr);
-        LPRQ<Node<Payload>> active_queue(nullptr);
-        run(idle_queue, true, queue_type, num_ops, max_threads);
-        run(active_queue, false, queue_type, num_ops, max_threads);
+    // Clean the CSVs from previous runs
+    for (const std::string& condition : {"latencies_idle.csv", "latencies_active.csv"}) {
+        std::remove((queue_type + "_" + condition).c_str());
+    }
+
+    for (int workers = 2; workers <= max_workers; workers += 2) {
+            std::cout << workers;
+        if (queue_type == "ms") {
+            MSQueue<Payload> idle_queue(new Node<Payload>());
+            MSQueue<Payload> active_queue(new Node<Payload>());
+            run(idle_queue, true, queue_type, num_ops, workers);
+            run(active_queue, false, queue_type, num_ops, workers);
+        } else if (queue_type == "lprq") {
+            LPRQ<Node<Payload>> idle_queue(nullptr);
+            LPRQ<Node<Payload>> active_queue(nullptr);
+            run(idle_queue, true, queue_type, num_ops, workers);
+            run(active_queue, false, queue_type, num_ops, workers);
+        }
+        else if (queue_type == "fc") {
+            FlatCombiningQueue<Node<Payload>> idle_queue(workers + 1);
+            FlatCombiningQueue<Node<Payload>> active_queue(workers + 1);
+            run(idle_queue, true, queue_type, num_ops, workers);
+            run(active_queue, false, queue_type, num_ops, workers);
+        }
     }
 
     return 0;

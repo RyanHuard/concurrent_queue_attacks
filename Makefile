@@ -11,7 +11,10 @@ clean:
 	rm -f $(TARGET)
 
 all:
-	./benchmark --queue=ms --ops=1000 && ./benchmark --queue=lprq --ops=1000 && python3 plot.py
+	./benchmark --queue=ms --ops=10000 --threads=16 \
+	&& ./benchmark --queue=lprq --ops=10000 --threads=16 \
+	&& ./benchmark --queue=fc --ops=10000 --threads=16
+
 
 plot:
 	python3 plot.py

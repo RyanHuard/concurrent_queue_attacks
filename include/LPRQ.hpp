@@ -78,7 +78,7 @@ public:
         }
     }
 
-    NodeType* enqueue(NodeType* new_payload)
+    NodeType* enqueue(NodeType* new_payload, int tid)
     {
         while(true)
         {
@@ -155,7 +155,7 @@ public:
         }
     }
 
-    NodeType* dequeue()
+    NodeType* dequeue(int tid)
     {
         while(true){
             PRQ* local_head_PRQ = head_PRQ.load(std::memory_order_acquire);

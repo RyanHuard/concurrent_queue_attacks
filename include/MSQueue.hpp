@@ -57,7 +57,7 @@ struct alignas(64) MSQueue {
     MSQueue(const MSQueue &) = delete;
     MSQueue &operator=(const MSQueue &) = delete;
 
-    sPayload* enqueue(Node<sPayload>* new_node) {
+    sPayload* enqueue(Node<sPayload>* new_node, int tid) {
         new_node->next.store(Pointer_t<sPayload>(nullptr, 0), std::memory_order_relaxed);
 
         while(true) {
@@ -86,7 +86,7 @@ struct alignas(64) MSQueue {
         }
     }
 
-    Node<sPayload>* dequeue() {
+    Node<sPayload>* dequeue(int tid) {
         while(true) {
             Pointer_t<sPayload> head_snapshot = head.load(std::memory_order_acquire);
             Pointer_t<sPayload> tail_snapshot = tail.load(std::memory_order_acquire);

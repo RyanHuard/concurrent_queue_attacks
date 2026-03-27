@@ -108,8 +108,8 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
 
 int main(int argc, char* argv[]) {
-    int num_ops = 1000; // per-thread
-    int max_workers = 8;
+    int num_ops = 10000; // per-thread
+    int max_workers = 15;
     std::string queue_type = "ms";
 
     // Parse args
@@ -125,7 +125,7 @@ int main(int argc, char* argv[]) {
         std::remove((queue_type + "_" + condition).c_str());
     }
 
-    for (int workers = 2; workers <= max_workers; workers += 2) {
+    for (int workers = 2; workers <= max_workers; workers++) {
             std::cout << workers;
         if (queue_type == "ms") {
             MSQueue<Payload> idle_queue(new Node<Payload>());

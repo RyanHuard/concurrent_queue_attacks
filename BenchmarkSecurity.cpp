@@ -44,17 +44,26 @@ static bool pin_thread_to_core(int core_id) {
 
 template <typename Queue>
 void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int worker_threads) {
-    // Wait for all worker threads + attacker thread
     std::barrier sync(worker_threads + 1);
+    std::atomic<bool> done{false};
+    std::atomic<int> workers_left{worker_threads};
 
     auto attacker = [&](int tid) {
-        pin_thread_to_core(tid); // attacker gets its own core
-
+        pin_thread_to_core(tid);
         std::vector<uint64_t> latencies;
+        latencies.reserve(num_ops);
 
         sync.arrive_and_wait();
 
-        for (int i = 0; i < num_ops; i++) {
+        // Warmup phase for attacker
+        for (int i = 0; i < 1000; i++) {
+            Payload* payload = new Payload(tid);
+            Node<Payload>* item = new Node<Payload>(payload);
+            queue.enqueue(item, tid);
+            Node<Payload>* result = queue.dequeue(tid);
+        }
+
+        while (!done.load(std::memory_order_acquire)) {
             Payload* payload = new Payload(tid);
             Node<Payload>* item = new Node<Payload>(payload);
 
@@ -64,9 +73,9 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
             latencies.push_back(end - start);
         }
-        
 
-        std::string filename = queue_type + "_" + (workers_idle ? "latencies_idle.csv" : "latencies_active.csv");
+        std::string suffix = !workers_idle ? "_latencies_active.csv" : "_latencies_idle.csv";
+        std::string filename = queue_type + suffix;
         bool file_exists = std::ifstream(filename).good();
         std::ofstream file(filename, std::ios::app);
 
@@ -75,22 +84,33 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
         }
 
         for (size_t i = 0; i < latencies.size(); i++) {
-            file << worker_threads << "," << i << "," << latencies[i] << "\n";
+            file << worker_threads << "," << i << "," 
+                 << latencies[i] << "\n";
         }
     };
 
     auto worker = [&](int tid) {
         pin_thread_to_core(tid);
         sync.arrive_and_wait();
-        
-        if (workers_idle) return;
 
-        for (int i = 0; i < num_ops; i++) {
-            Payload* payload = new Payload(tid);
-            Node<Payload>* item = new Node<Payload>(payload);
-            
-            queue.enqueue(item, tid);
-            Node<Payload>* result = queue.dequeue(tid);
+        if (!workers_idle) {
+            for (int i = 0; i < 1000; i++) {
+                Payload* payload = new Payload(tid);
+                Node<Payload>* item = new Node<Payload>(payload);
+                queue.enqueue(item, tid);
+                Node<Payload>* result = queue.dequeue(tid);
+            }
+
+            for (int i = 0; i < num_ops; i++) {
+                Payload* payload = new Payload(tid);
+                Node<Payload>* item = new Node<Payload>(payload);
+                queue.enqueue(item, tid);
+                Node<Payload>* result = queue.dequeue(tid);
+            }
+        }
+
+        if (workers_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            done.store(true, std::memory_order_release);
         }
     };
 
@@ -103,7 +123,6 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
     for (auto& t : threads) {
         t.join();
     }
-
 }
 
 

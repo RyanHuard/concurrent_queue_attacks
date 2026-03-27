@@ -63,7 +63,7 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
             Node<Payload>* result = queue.dequeue(tid);
         }
 
-        while (!done.load(std::memory_order_acquire)) {
+        for (int i = 0; i < num_ops; i++) {
             Payload* payload = new Payload(tid);
             Node<Payload>* item = new Node<Payload>(payload);
 
@@ -73,6 +73,8 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
             latencies.push_back(end - start);
         }
+
+        done.store(true, std::memory_order_release);
 
         std::string suffix = !workers_idle ? "_latencies_active.csv" : "_latencies_idle.csv";
         std::string filename = queue_type + suffix;
@@ -94,6 +96,7 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
         sync.arrive_and_wait();
 
         if (!workers_idle) {
+            // Warmup
             for (int i = 0; i < 1000; i++) {
                 Payload* payload = new Payload(tid);
                 Node<Payload>* item = new Node<Payload>(payload);
@@ -101,13 +104,21 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
                 Node<Payload>* result = queue.dequeue(tid);
             }
 
-            for (int i = 0; i < num_ops; i++) {
+            // Actual work
+            while (!done.load(std::memory_order_relaxed)) {
                 Payload* payload = new Payload(tid);
                 Node<Payload>* item = new Node<Payload>(payload);
                 queue.enqueue(item, tid);
                 Node<Payload>* result = queue.dequeue(tid);
             }
         }
+        else {
+            // Idle case: just burn a little time so structure matches better
+            while (!done.load(std::memory_order_relaxed)) {
+                asm volatile("pause" ::: "memory");
+            }
+        }
+
 
         if (workers_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             done.store(true, std::memory_order_release);

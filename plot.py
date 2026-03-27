@@ -12,7 +12,7 @@ workers = 15
 trial = None
 bins = 100
 
-threads = [2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+threads = [2,3,4,5,6,7,8,9,10,11,12,13,14,15]
 
 overtake = {
     "ms": {
@@ -36,13 +36,14 @@ def filter_df(df):
     return df
 
 def clip_99(df):
-    p99 = df["latency"].quantile(0.99)
+    p99 = df["latency"].quantile(1)
     return df[df["latency"] <= p99]
 
 
 for q in queues:
     active = pd.read_csv(f"{q}_latencies_active.csv")
     idle   = pd.read_csv(f"{q}_latencies_idle.csv")
+    
 
     active = clip_99(filter_df(active))
     idle   = clip_99(filter_df(idle))
@@ -51,7 +52,7 @@ for q in queues:
         active["latency"],
         bins=bins,
         histtype="step",
-        linewidth=2,
+        linewidth=1,
         label=f"{q} active"
     )
 
@@ -60,14 +61,16 @@ for q in queues:
         bins=bins,
         histtype="step",
         linestyle="dashed",
-        linewidth=2,
+        linewidth=1,
         label=f"{q} idle"
     )
 
+print(active["latency"].min(), idle["latency"].min())
 plt.xlabel("Latency (cycles)")
 plt.ylabel("Density")
 plt.title(f"Latency Distributions (≤99th percentile, workers={workers})")
 plt.legend()
+
 plt.xscale("log")
 plt.yscale("log")
 plt.show()

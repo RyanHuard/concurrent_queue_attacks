@@ -1,3 +1,371 @@
+// #include <atomic>
+// #include <barrier>
+// #include <chrono>
+// #include <cinttypes>
+// #include <cstdio>
+// #include <cstdlib>
+// #include <cstring>
+// #include <fstream>
+// #include <iostream>
+// #include <string>
+// #include <thread>
+// #include <vector>
+// #include <pthread.h>
+// #include <sched.h>
+// #include <unistd.h>
+// #include <x86intrin.h>
+
+// #include "LPRQ.hpp"
+// #include "MSQueue.hpp"
+// #include "FCQ.hpp"
+// #include "sPayload.hpp"
+
+// struct Payload {
+//     int value;
+// };
+
+// inline uint64_t rdtscp() {
+//     uint32_t lo, hi;
+//     __asm__ __volatile__("rdtscp" : "=a"(lo), "=d"(hi) :: "ecx");
+//     return ((uint64_t)hi << 32) | lo;
+// }
+
+// static inline void cpu_pause() {
+//     __asm__ __volatile__("pause" ::: "memory");
+// }
+
+// static bool pin_thread_to_core(int core_id) {
+//     cpu_set_t cpuset;
+//     CPU_ZERO(&cpuset);
+//     CPU_SET(core_id, &cpuset);
+//     return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0;
+// }
+
+
+// // template <typename Queue>
+// // void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int worker_threads) {
+// //     std::barrier sync(worker_threads + 1);
+// //     std::atomic<bool> done{false};
+// //     std::atomic<int> workers_left{worker_threads};
+
+// //     auto attacker = [&](int tid) {
+// //         pin_thread_to_core(tid);
+// //         std::vector<uint64_t> latencies;
+// //         latencies.reserve(num_ops);
+
+// //         sync.arrive_and_wait();
+
+// //         // Warmup phase for attacker
+// //         for (int i = 0; i < 1000; i++) {
+// //             Payload* payload = new Payload(tid);
+// //             Node<Payload>* item = new Node<Payload>(payload);
+// //             queue.enqueue(item, tid);
+// //             Node<Payload>* result = queue.dequeue(tid);
+// //         }
+
+// //         for (int i = 0; i < num_ops; i++) {
+// //             Payload* payload = new Payload(tid);
+// //             Node<Payload>* item = new Node<Payload>(payload);
+
+// //             uint64_t start = rdtscp();
+// //             queue.enqueue(item, tid);
+// //             uint64_t end = rdtscp();
+
+// //             latencies.push_back(end - start);
+// //         }
+
+// //         done.store(true, std::memory_order_release);
+
+// //         std::string suffix = !workers_idle ? "_latencies_active.csv" : "_latencies_idle.csv";
+// //         std::string filename = queue_type + suffix;
+// //         bool file_exists = std::ifstream(filename).good();
+// //         std::ofstream file(filename, std::ios::app);
+
+// //         if (!file_exists) {
+// //             file << "workers,sample,latency\n";
+// //         }
+
+// //         for (size_t i = 0; i < latencies.size(); i++) {
+// //             file << worker_threads << "," << i << "," 
+// //                  << latencies[i] << "\n";
+// //         }
+// //     };
+
+// //     auto worker = [&](int tid) {
+// //         pin_thread_to_core(tid);
+// //         sync.arrive_and_wait();
+
+// //         if (!workers_idle) {
+// //             // Warmup
+// //             for (int i = 0; i < 1000; i++) {
+// //                 Payload* payload = new Payload(tid);
+// //                 Node<Payload>* item = new Node<Payload>(payload);
+// //                 queue.enqueue(item, tid);
+// //                 Node<Payload>* result = queue.dequeue(tid);
+// //             }
+
+// //             // Actual work
+// //             while (!done.load(std::memory_order_relaxed)) {
+// //                 Payload* payload = new Payload(tid);
+// //                 Node<Payload>* item = new Node<Payload>(payload);
+// //                 queue.enqueue(item, tid);
+// //                 Node<Payload>* result = queue.dequeue(tid);
+// //             }
+// //         }
+// //         else {
+// //             // "Idle" 
+// //             while (!done.load(std::memory_order_relaxed)) {
+// //                // asm volatile("pause" ::: "memory");
+// //                  Payload* payload = new Payload(tid);
+// //                 Node<Payload>* item = new Node<Payload>(payload);
+// //                queue.enqueue(item, tid);
+// //                for (int i = 0; i < 500; i++) cpu_pause();
+// //                 Node<Payload>* result = queue.dequeue(tid);
+// //             }
+// //         }
+
+
+// //         if (workers_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+// //             done.store(true, std::memory_order_release);
+// //         }
+// //     };
+
+// //     std::vector<std::thread> threads;
+// //     for (int i = 0; i < worker_threads; i++) {
+// //         threads.emplace_back(worker, i);
+// //     }
+// //     threads.emplace_back(attacker, worker_threads);
+
+// //     for (auto& t : threads) {
+// //         t.join();
+// //     }
+// // }
+
+// // ---- CHANGE-POINT BENCHMARK ----
+// // Workers start in one phase (idle or active), then switch mid-run.
+// // The attacker logs timestamped enqueue latencies throughout.
+// // Goal: measure how quickly an attacker can detect the workload transition
+// // from their own latency stream alone.
+ 
+// template <typename Queue>
+// void run_changepoint(Queue& queue, const std::string& queue_type,
+//                      int num_ops, int worker_threads, int trial,
+//                      bool start_idle) {
+//     // start_idle=true:  workers go idle -> active  (transition at midpoint)
+//     // start_idle=false: workers go active -> idle
+ 
+//     std::barrier sync(worker_threads + 1);
+//     std::atomic<bool> done{false};
+ 
+//     // Phase flag: false = phase 1, true = phase 2
+//     // Attacker flips this at the midpoint of its ops
+//     std::atomic<bool> phase2{false};
+ 
+//     // Record the attacker's op index at which the switch was signaled
+//     int switch_op = num_ops / 2;
+ 
+//     auto attacker = [&](int tid) {
+//         pin_thread_to_core(tid);
+ 
+//         struct Sample {
+//             uint64_t latency;
+//             int op_index;
+//         };
+ 
+//         std::vector<Sample> samples;
+//         samples.reserve(num_ops);
+ 
+//         sync.arrive_and_wait();
+ 
+//         // Warmup
+//         for (int i = 0; i < 1000; i++) {
+//             Payload* payload = new Payload{tid};
+//             Node<Payload>* item = new Node<Payload>(payload);
+//             queue.enqueue(item, tid);
+//             Node<Payload>* result = queue.dequeue(tid);
+//         }
+ 
+//         for (int i = 0; i < num_ops; i++) {
+//             // Signal phase transition at midpoint
+//             if (i == switch_op) {
+//                 phase2.store(true, std::memory_order_release);
+//             }
+ 
+//             Payload* payload = new Payload{tid};
+//             Node<Payload>* item = new Node<Payload>(payload);
+ 
+//             uint64_t start = rdtscp();
+//             queue.enqueue(item, tid);
+//             uint64_t end = rdtscp();
+ 
+//             samples.push_back({end - start, i});
+//         }
+ 
+//         done.store(true, std::memory_order_release);
+ 
+//         // Write CSV
+//         std::string direction = start_idle ? "idle_to_active" : "active_to_idle";
+//         std::string filename = queue_type + "_changepoint_" + direction + ".csv";
+ 
+//         // Check if file exists (for appending across worker counts / trials)
+//         bool file_exists = std::ifstream(filename).good();
+//         std::ofstream file(filename, std::ios::app);
+ 
+//         if (!file_exists) {
+//             file << "workers,trial,op_index,latency,switch_op\n";
+//         }
+ 
+//         for (auto& s : samples) {
+//             file << worker_threads << ","
+//                  << trial << ","
+//                  << s.op_index << ","
+//                  << s.latency << ","
+//                  << switch_op << "\n";
+//         }
+//     };
+ 
+//     auto worker = [&](int tid) {
+//         pin_thread_to_core(tid);
+//         sync.arrive_and_wait();
+ 
+//         // Warmup (always active)
+//         for (int i = 0; i < 1000; i++) {
+//             Payload* payload = new Payload{tid};
+//             Node<Payload>* item = new Node<Payload>(payload);
+//             queue.enqueue(item, tid);
+//             Node<Payload>* result = queue.dequeue(tid);
+//         }
+ 
+//         while (!done.load(std::memory_order_relaxed)) {
+//             bool in_phase2 = phase2.load(std::memory_order_relaxed);
+ 
+//             // Determine current behavior
+//             bool currently_idle;
+//             if (start_idle) {
+//                 currently_idle = !in_phase2;  // idle first, then active
+//             } else {
+//                 currently_idle = in_phase2;   // active first, then idle
+//             }
+ 
+//             Payload* payload = new Payload{tid};
+//             Node<Payload>* item = new Node<Payload>(payload);
+//             queue.enqueue(item, tid);
+ 
+//             if (currently_idle) {
+//                 for (int i = 0; i < 500; i++) cpu_pause();
+//             }
+ 
+//             Node<Payload>* result = queue.dequeue(tid);
+//         }
+//     };
+ 
+//     std::vector<std::thread> threads;
+//     for (int i = 0; i < worker_threads; i++) {
+//         threads.emplace_back(worker, i);
+//     }
+//     threads.emplace_back(attacker, worker_threads);
+ 
+//     for (auto& t : threads) {
+//         t.join();
+//     }
+// }
+
+
+// // int main(int argc, char* argv[]) {
+// //     int num_ops = 10000; // per-thread
+// //     int max_workers = 16;
+// //     int trials = 1;
+// //     std::string queue_type = "ms";
+
+// //     // Parse args
+// //     for (int i = 1; i < argc; i++) {
+// //         std::string arg = argv[i];
+// //         if (arg.rfind("--queue=", 0) == 0) queue_type = arg.substr(8);
+// //         if (arg.rfind("--ops=", 0) == 0) num_ops = std::stoi(arg.substr(6));
+// //         if (arg.rfind("--threads=", 0) == 0) max_workers = std::stoi(arg.substr(10));
+// //     }
+
+// //     // Clean the CSVs from previous runs
+// //     for (const std::string& condition : {"latencies_idle.csv", "latencies_active.csv"}) {
+// //         std::remove((queue_type + "_" + condition).c_str());
+// //     }
+
+// //     for (int workers = 2; workers <= max_workers; workers++) {
+// //      //   for (int trial = 0; trial < trials; trial++) {
+// //             if (queue_type == "ms") {
+// //                 MSQueue<Payload> idle_queue(new Node<Payload>());
+// //                 MSQueue<Payload> active_queue(new Node<Payload>());
+// //                 run(idle_queue, true, queue_type, num_ops, workers);
+// //                 run(active_queue, false, queue_type, num_ops, workers);
+// //             } else if (queue_type == "lprq") {
+// //                 LPRQ<Node<Payload>> idle_queue(nullptr);
+// //                 LPRQ<Node<Payload>> active_queue(nullptr);
+// //                 run(idle_queue, true, queue_type, num_ops, workers);
+// //                 run(active_queue, false, queue_type, num_ops, workers);
+// //             }
+// //             else if (queue_type == "fc") {
+// //                 FlatCombiningQueue<Node<Payload>> idle_queue(workers + 1);
+// //                 FlatCombiningQueue<Node<Payload>> active_queue(workers + 1);
+// //                 run(idle_queue, true, queue_type, num_ops, workers);
+// //                 run(active_queue, false, queue_type, num_ops, workers);
+// //             }
+// //   //  }
+
+// //     }
+
+// //     return 0;
+// // }
+
+
+// int main(int argc, char* argv[]) {
+//     int num_ops = 20000;      // more ops so each phase has enough samples
+//     int max_workers = 15;
+//     int min_workers = 7;      // focus on higher contention where signal is clearest
+//     int trials = 50;
+//     std::string queue_type = "ms";
+ 
+//     for (int i = 1; i < argc; i++) {
+//         std::string arg = argv[i];
+//         if (arg.rfind("--queue=", 0) == 0)   queue_type = arg.substr(8);
+//         if (arg.rfind("--ops=", 0) == 0)     num_ops = std::stoi(arg.substr(6));
+//         if (arg.rfind("--threads=", 0) == 0) max_workers = std::stoi(arg.substr(10));
+//         if (arg.rfind("--trials=", 0) == 0)  trials = std::stoi(arg.substr(9));
+//         if (arg.rfind("--min-threads=", 0) == 0) min_workers = std::stoi(arg.substr(14));
+//     }
+ 
+//     // Clean CSVs from previous runs
+//     for (const std::string& direction : {"idle_to_active", "active_to_idle"}) {
+//         std::remove((queue_type + "_changepoint_" + direction + ".csv").c_str());
+//     }
+ 
+//     for (int workers = min_workers; workers <= max_workers; workers++) {
+//         for (int trial = 0; trial < trials; trial++) {
+//             std::cout << queue_type << " | workers=" << workers
+//                       << " trial=" << trial << std::endl;
+ 
+//             // idle -> active transition
+//             if (queue_type == "ms") {
+//                 MSQueue<Payload> q1(new Node<Payload>());
+//                 run_changepoint(q1, queue_type, num_ops, workers, trial, true);
+//                 MSQueue<Payload> q2(new Node<Payload>());
+//                 run_changepoint(q2, queue_type, num_ops, workers, trial, false);
+//             } else if (queue_type == "lprq") {
+//                 LPRQ<Node<Payload>> q1(nullptr);
+//                 run_changepoint(q1, queue_type, num_ops, workers, trial, true);
+//                 LPRQ<Node<Payload>> q2(nullptr);
+//                 run_changepoint(q2, queue_type, num_ops, workers, trial, false);
+//             } else if (queue_type == "fc") {
+//                 FlatCombiningQueue<Node<Payload>> q1(workers + 1);
+//                 run_changepoint(q1, queue_type, num_ops, workers, trial, true);
+//                 FlatCombiningQueue<Node<Payload>> q2(workers + 1);
+//                 run_changepoint(q2, queue_type, num_ops, workers, trial, false);
+//             }
+//         }
+//     }
+ 
+//     return 0;
+// }
+
 #include <atomic>
 #include <barrier>
 #include <chrono>
@@ -7,6 +375,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,12 +410,53 @@ static bool pin_thread_to_core(int core_id) {
     return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0;
 }
 
+// ---- WORKLOAD TYPES ----
+// Both do the same number of enqueue/dequeue pairs on average.
+// DETERMINISTIC: fixed pause of MEAN_PAUSE between each pair
+// VARIABLE: exponentially distributed pause with mean = MEAN_PAUSE
+//
+// Equal mean contention. Only difference is temporal pattern.
+
+enum class Workload { DETERMINISTIC, VARIABLE };
+
+static const char* workload_name(Workload w) {
+    return w == Workload::DETERMINISTIC ? "deterministic" : "variable";
+}
+
+static constexpr int MEAN_PAUSE = 200;
 
 template <typename Queue>
-void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num_ops, int worker_threads) {
+void worker_loop(Queue& queue, int tid, Workload workload,
+                 std::atomic<bool>& done) {
+    std::mt19937 rng(tid * 7919 + static_cast<int>(workload));
+    std::exponential_distribution<double> exp_dist(1.0 / MEAN_PAUSE);
+
+    while (!done.load(std::memory_order_relaxed)) {
+        Payload* p = new Payload{tid};
+        Node<Payload>* item = new Node<Payload>(p);
+        queue.enqueue(item, tid);
+        Node<Payload>* result = queue.dequeue(tid);
+
+        int pause_iters;
+        if (workload == Workload::DETERMINISTIC) {
+            pause_iters = MEAN_PAUSE;
+        } else {
+            pause_iters = static_cast<int>(exp_dist(rng));
+            if (pause_iters > MEAN_PAUSE * 10) pause_iters = MEAN_PAUSE * 10;
+        }
+
+        for (int i = 0; i < pause_iters; i++) {
+            cpu_pause();
+        }
+    }
+}
+
+template <typename Queue>
+void run_classify(Queue& queue, Workload workload, const std::string& queue_type,
+                  int num_ops, int worker_threads, int trial) {
+
     std::barrier sync(worker_threads + 1);
     std::atomic<bool> done{false};
-    std::atomic<int> workers_left{worker_threads};
 
     auto attacker = [&](int tid) {
         pin_thread_to_core(tid);
@@ -55,17 +465,17 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
         sync.arrive_and_wait();
 
-        // Warmup phase for attacker
+        // Warmup
         for (int i = 0; i < 1000; i++) {
-            Payload* payload = new Payload(tid);
-            Node<Payload>* item = new Node<Payload>(payload);
+            Payload* p = new Payload{tid};
+            Node<Payload>* item = new Node<Payload>(p);
             queue.enqueue(item, tid);
-            Node<Payload>* result = queue.dequeue(tid);
+            queue.dequeue(tid);
         }
 
         for (int i = 0; i < num_ops; i++) {
-            Payload* payload = new Payload(tid);
-            Node<Payload>* item = new Node<Payload>(payload);
+            Payload* p = new Payload{tid};
+            Node<Payload>* item = new Node<Payload>(p);
 
             uint64_t start = rdtscp();
             queue.enqueue(item, tid);
@@ -76,17 +486,20 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
         done.store(true, std::memory_order_release);
 
-        std::string suffix = !workers_idle ? "_latencies_active.csv" : "_latencies_idle.csv";
-        std::string filename = queue_type + suffix;
+        // Write CSV
+        std::string filename = queue_type + "_classify.csv";
         bool file_exists = std::ifstream(filename).good();
         std::ofstream file(filename, std::ios::app);
 
         if (!file_exists) {
-            file << "workers,sample,latency\n";
+            file << "workers,trial,workload,sample,latency\n";
         }
 
         for (size_t i = 0; i < latencies.size(); i++) {
-            file << worker_threads << "," << i << "," 
+            file << worker_threads << ","
+                 << trial << ","
+                 << workload_name(workload) << ","
+                 << i << ","
                  << latencies[i] << "\n";
         }
     };
@@ -95,34 +508,15 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
         pin_thread_to_core(tid);
         sync.arrive_and_wait();
 
-        if (!workers_idle) {
-            // Warmup
-            for (int i = 0; i < 1000; i++) {
-                Payload* payload = new Payload(tid);
-                Node<Payload>* item = new Node<Payload>(payload);
-                queue.enqueue(item, tid);
-                Node<Payload>* result = queue.dequeue(tid);
-            }
-
-            // Actual work
-            while (!done.load(std::memory_order_relaxed)) {
-                Payload* payload = new Payload(tid);
-                Node<Payload>* item = new Node<Payload>(payload);
-                queue.enqueue(item, tid);
-                Node<Payload>* result = queue.dequeue(tid);
-            }
-        }
-        else {
-            // Idle case: just burn a little time so structure matches better
-            while (!done.load(std::memory_order_relaxed)) {
-                asm volatile("pause" ::: "memory");
-            }
+        // Warmup
+        for (int i = 0; i < 1000; i++) {
+            Payload* p = new Payload{tid};
+            Node<Payload>* item = new Node<Payload>(p);
+            queue.enqueue(item, tid);
+            queue.dequeue(tid);
         }
 
-
-        if (workers_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            done.store(true, std::memory_order_release);
-        }
+        worker_loop(queue, tid, workload, done);
     };
 
     std::vector<std::thread> threads;
@@ -138,41 +532,41 @@ void run(Queue& queue, bool workers_idle, const std::string& queue_type, int num
 
 
 int main(int argc, char* argv[]) {
-    int num_ops = 10000; // per-thread
+    int num_ops = 10000;
     int max_workers = 15;
+    int min_workers = 2;
+    int trials = 10;
     std::string queue_type = "ms";
 
-    // Parse args
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg.rfind("--queue=", 0) == 0) queue_type = arg.substr(8);
-        if (arg.rfind("--ops=", 0) == 0) num_ops = std::stoi(arg.substr(6));
-        if (arg.rfind("--threads=", 0) == 0) max_workers = std::stoi(arg.substr(10));
+        if (arg.rfind("--queue=", 0) == 0)       queue_type = arg.substr(8);
+        if (arg.rfind("--ops=", 0) == 0)         num_ops = std::stoi(arg.substr(6));
+        if (arg.rfind("--threads=", 0) == 0)     max_workers = std::stoi(arg.substr(10));
+        if (arg.rfind("--min-threads=", 0) == 0) min_workers = std::stoi(arg.substr(14));
+        if (arg.rfind("--trials=", 0) == 0)      trials = std::stoi(arg.substr(9));
     }
 
-    // Clean the CSVs from previous runs
-    for (const std::string& condition : {"latencies_idle.csv", "latencies_active.csv"}) {
-        std::remove((queue_type + "_" + condition).c_str());
-    }
+    std::remove((queue_type + "_classify.csv").c_str());
 
-    for (int workers = 2; workers <= max_workers; workers++) {
-            std::cout << workers;
-        if (queue_type == "ms") {
-            MSQueue<Payload> idle_queue(new Node<Payload>());
-            MSQueue<Payload> active_queue(new Node<Payload>());
-            run(idle_queue, true, queue_type, num_ops, workers);
-            run(active_queue, false, queue_type, num_ops, workers);
-        } else if (queue_type == "lprq") {
-            LPRQ<Node<Payload>> idle_queue(nullptr);
-            LPRQ<Node<Payload>> active_queue(nullptr);
-            run(idle_queue, true, queue_type, num_ops, workers);
-            run(active_queue, false, queue_type, num_ops, workers);
-        }
-        else if (queue_type == "fc") {
-            FlatCombiningQueue<Node<Payload>> idle_queue(workers + 1);
-            FlatCombiningQueue<Node<Payload>> active_queue(workers + 1);
-            run(idle_queue, true, queue_type, num_ops, workers);
-            run(active_queue, false, queue_type, num_ops, workers);
+    for (int workers = min_workers; workers <= max_workers; workers++) {
+        for (int trial = 0; trial < trials; trial++) {
+            for (auto wl : {Workload::DETERMINISTIC, Workload::VARIABLE}) {
+                std::cout << queue_type << " | workers=" << workers
+                          << " trial=" << trial
+                          << " workload=" << workload_name(wl) << std::endl;
+
+                if (queue_type == "ms") {
+                    MSQueue<Payload> q(new Node<Payload>());
+                    run_classify(q, wl, queue_type, num_ops, workers, trial);
+                } else if (queue_type == "lprq") {
+                    LPRQ<Node<Payload>> q(nullptr);
+                    run_classify(q, wl, queue_type, num_ops, workers, trial);
+                } else if (queue_type == "fc") {
+                    FlatCombiningQueue<Node<Payload>> q(workers + 1);
+                    run_classify(q, wl, queue_type, num_ops, workers, trial);
+                }
+            }
         }
     }
 
